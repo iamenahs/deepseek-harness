@@ -259,9 +259,20 @@ function mount(
 
 describe('Hero chrome', () => {
   it('renders the English preview badge through the hero locale seat', () => {
-    const view = render(<HeroShell t={makeTranslate(en, commonEn)} />)
+    const view = render(<HeroShell t={makeTranslate(en, commonEn)} renderHeadline={fallback => fallback} />)
     expect(view.getByText('Into the Unknown')).toBeTruthy()
     expect(view.getByText('Preview')).toBeTruthy()
+  })
+
+  it('renders an electing headline entry in place of the shipped row', () => {
+    const view = render(
+      <HeroShell
+        t={makeTranslate(en, commonEn)}
+        renderHeadline={() => <span>Deployment headline</span>}
+      />,
+    )
+    expect(view.getByText('Deployment headline')).toBeTruthy()
+    expect(view.queryByText('Into the Unknown')).toBeNull()
   })
 })
 

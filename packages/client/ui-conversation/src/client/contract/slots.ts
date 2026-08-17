@@ -131,6 +131,20 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
      */
     'conversation.composer': { kind: 'chain'; scope: 'session'; owner: ComposerChainProps }
     /**
+     * The hero headline row — logo, headline text, and release badge — on the
+     * new-session screen. A takeover chain, not a seat: with no entry the
+     * owner's shipped headline renders as the chain fallback, so a deployment
+     * that leaves this alone sees no change. An electing entry replaces the
+     * whole row rather than any part of it, because the three elements are one
+     * typographic unit whose spacing is set by the owner's grid.
+     *
+     * Root scope: the new-session screen exists before any session, so an
+     * entry cannot read session state. Entries carry no owner currency and
+     * therefore elect unconditionally; the last-registered lowest priority
+     * wins, matching every other chain.
+     */
+    'conversation.hero.headline': { kind: 'chain'; scope: 'root' }
+    /**
      * The hero-phase Workspace picker hole: rendered by ConversationRoot
      * while the session is blank (picking another workspace switches to that
      * workspace's blank session, draft carried). Root scope: the picker
@@ -573,6 +587,7 @@ export type ConversationSlotProps =
     | 'conversation.input.overlay'
     | 'conversation.input.dock' | 'conversation.composer.dock'
     | 'conversation.input.left' | 'conversation.input.right'
+    | 'conversation.hero.headline'
     | 'conversation.hero.workspace'
     | 'conversation.hero.agentPreset'
   >
