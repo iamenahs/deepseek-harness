@@ -43,6 +43,8 @@ export interface Config {
   model: string
   /** Bundled agent-loop concurrency cap; `1` is serial and omission uses its default. */
   maxParallelToolCalls?: number
+  /** How much of a turn's progress the bridge publishes (see dsh-acp `progress`). */
+  progress?: acp.AcpProgress
   /** Deployment persona (the system-prompt plugin's `persona` config). */
   persona?: string
   /** Explicit model-facing tool order (the system-prompt plugin's `toolOrder` config; see dsh-system-prompt). */
@@ -80,6 +82,7 @@ export const Config: z<Config> = z.object({
   provider: z.string().required(),
   model: z.string().required(),
   maxParallelToolCalls: z.number().step(1).min(1),
+  progress: acp.AcpProgressSchema,
   persona: z.string(),
   // The array default is forced to undefined: ABSENT means "lexicographic
   // order" (the owning dsh-system-prompt schema does the same), while
@@ -134,7 +137,11 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     const query = ctx.plugin(SqliteSessionQueryEngine, { path: join(persistenceRoot, 'session-query.db') })
     await query
     yield query.dispose
-    const transport = ctx.plugin(acp, { provider: config.provider, model: config.model })
+    const transport = ctx.plugin(acp, {
+      provider: config.provider,
+      model: config.model,
+      ...(config.progress === undefined ? {} : { progress: config.progress }),
+    })
     await transport
     yield transport.dispose
   }, 'acp-demo.composition')

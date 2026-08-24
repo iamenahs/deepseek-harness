@@ -41,6 +41,43 @@ describe('ACP automation output boundary', () => {
     }])
   })
 
+  it('publishes tool calls when the deployment asks for progress', async () => {
+    harness = await makeBridgeHarness({
+      script: [toolCallResponse(), textResponse('done')],
+      config: { progress: 'tools' },
+    })
+    harness.ctx.tools.register(defineContentToolFixture({
+      name: 'echo',
+      description: 'Return a deterministic result.',
+      parameters: {},
+      execute: () => Promise.resolve([{ type: 'text', text: 'tool result' }]),
+    }))
+    await harness.client.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} })
+    const { sessionId } = await harness.client.newSession({ cwd: process.cwd(), mcpServers: [] })
+    await harness.client.prompt({ sessionId, prompt: [{ type: 'text', text: 'go' }] })
+
+    await vi.waitFor(() => { expect(harness!.updates).toHaveLength(3) })
+    // The call, its result, then the text — in the order the turn produced
+    // them, so a client can attach the result to the call it already showed.
+    expect(harness.updates).toEqual([
+      {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'call-1',
+        title: 'echo',
+        kind: 'other',
+        status: 'in_progress',
+        rawInput: {},
+      },
+      {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call-1',
+        status: 'completed',
+        content: [{ type: 'content', content: { type: 'text', text: 'tool result' } }],
+      },
+      { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'done' } },
+    ])
+  })
+
   it('ignores events from agents the bridge does not own', async () => {
     harness = await makeBridgeHarness({ script: [textResponse('foreign')] })
     await harness.client.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} })
