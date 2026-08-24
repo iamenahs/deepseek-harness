@@ -273,7 +273,19 @@ export function apply(ctx: Context, config: AcpConfig): void {
     if (record === undefined || request.callId === undefined) return next()
     return conn.requestPermission({
       sessionId: record.agent.session.id,
-      toolCall: { toolCallId: request.callId },
+      // The asker's own identification of what it is asking about. A client
+      // that receives an id alone cannot describe the decision it is being
+      // asked to make — and this bridge publishes no tool updates, so the id
+      // is one it has never seen. `toolName` and `reason` are carried on the
+      // request for exactly this ("presentation and audit"); passing them is
+      // not presentation policy, it is the question.
+      toolCall: {
+        toolCallId: request.callId,
+        title: request.toolName,
+        ...(request.reason === undefined || request.reason === ''
+          ? {}
+          : { content: [{ type: 'content', content: { type: 'text', text: request.reason } }] }),
+      },
       options: [
         { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
         { optionId: 'reject-once', name: 'Reject', kind: 'reject_once' },

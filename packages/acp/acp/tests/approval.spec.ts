@@ -42,6 +42,31 @@ describe('ACP machine permission policy', () => {
     await expect(harness.ctx.approval.request(request)).resolves.toBe('rejected')
   })
 
+  it('names the tool and carries the asker\'s reason', async () => {
+    harness = await makeBridgeHarness()
+    harness.onPermission = () => ({ outcome: { outcome: 'selected', optionId: 'allow-once' } })
+    const request = await ownedRequest({ reason: 'writes outside the workspace root' })
+    await expect(harness.ctx.approval.request(request)).resolves.toBe('allowed-once')
+    // A client sees no tool updates from this bridge, so the request itself
+    // has to say what is being decided.
+    expect(harness.permissionRequests[0]).toMatchObject({
+      toolCall: {
+        toolCallId: 'call-9',
+        title: 'bash',
+        content: [{ type: 'content', content: { type: 'text', text: 'writes outside the workspace root' } }],
+      },
+    })
+  })
+
+  it('omits the reason field when the asker gave none', async () => {
+    harness = await makeBridgeHarness()
+    harness.onPermission = () => ({ outcome: { outcome: 'selected', optionId: 'reject-once' } })
+    const request = await ownedRequest()
+    await expect(harness.ctx.approval.request(request)).resolves.toBe('rejected')
+    const { toolCall } = harness.permissionRequests[0]!
+    expect(toolCall).toEqual({ toolCallId: 'call-9', title: 'bash' })
+  })
+
   it('maps cancellation and unknown choices without granting access', async () => {
     harness = await makeBridgeHarness()
     const request = await ownedRequest()
