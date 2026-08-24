@@ -4,7 +4,7 @@
 
 通过 JSON-RPC stdio 提供的仅面向自动化的 [ACP（Agent Client Protocol）](https://agentclientprotocol.com) 服务器。程序化客户端可以创建新 harness agent（智能体）、发送文本／图片提示词、收集已提交的 assistant 文本／图片、按策略响应一次性权限请求并取消工作。仓库中的主要客户端是 [`dsh-subagent-acp`](../../subagent/subagent-acp/README.zh.md)。
 
-此包是传输适配器，而非 UI 集成或能力 seam。它不公开编辑器导航、transcript（文本记录）回放、命令、模式、配置选择器、信息征集、推理（reasoning）、计划、标题或工具展示。交互式渲染与向用户提问属于 Web 宿主和客户端模块。
+此包是传输适配器，而非 UI 集成或能力 seam。它不公开编辑器导航、transcript（文本记录）回放、命令、模式、配置选择器、信息征集、推理（reasoning）、计划或标题。工具调用是唯一的例外，且仅在被请求时：部署设置 `progress: 'tools'` 后会收到规范自带的 `tool_call`／`tool_call_update`；默认两者都不发出。交互式渲染与向用户提问属于 Web 宿主和客户端模块。
 
 ## 插件
 
@@ -14,8 +14,11 @@
 |---|---|---|
 | `provider` | 无 | 每个已创建 agent 的初始提供方路由。 |
 | `model` | 无 | 每个已创建 agent 的初始模型。 |
+| `progress` | `'none'` | 一轮对话中有多少内容到达客户端。`'none'` 仅发出已提交的 assistant 文本与图片。`'tools'` 额外发出 `tool_call` 与 `tool_call_update`；无论取何值，推理、待办、计划、标题、终端、diff 与位置信息都不上线。 |
 
 两个字段都是可选的，以便由另一个 agent/request 监听器提供目标。可运行的 ACP 组合同时要求两者。
+
+`progress: 'tools'` 扩大的是告知已受信任客户端的内容，而非扩大告知对象。它携带的工具名与参数，正是持久化会话日志已经记录的同一批值；传输通道是部署自身的 stdio 管道；默认值让所有既有组合保持静默。未主动请求的部署，发出的内容与此前完全一致。
 
 <a id="protocol-contract"></a>
 
@@ -28,7 +31,7 @@
 | `session/new` | 以绝对路径作为主 `cwd` 创建新 agent；接受空的 `additionalDirectories` 和 `mcpServers`，拒绝非空值。 |
 | `session/prompt` | 保留文本与受支持内联图片块的顺序，将资源链接渲染为带方括号的文本引用，并拒绝音频、嵌入资源、格式错误／空输入，或在未公布能力时提交图片。它会先校验完整图片批次并重新检查会话的最新确切路由，再保存任一成员；在用户事件前提交全部图片；每个会话只允许一个正在处理的请求，并等待准入，以及消息入队后的整个 Agent 空闲和有序输出交付全部停稳。正常完全停稳时报告 `end_turn`；显式 ACP 取消、资源释放，或准入被丢弃的提示词（无轮次槽位）时报告 `cancelled`。 |
 | `session/cancel` | 标记并中止正在进行的准入，但不会取消或等待同一 Agent 上无关的既有工作；该提示词进入 Agent inbox 后，才会取消指定的 Agent 并等待自有区间停稳。不发布迟到的用户消息，提示词以 `cancelled` 结算。没有进行中的提示词时会取消自主工作；未知 id 为空操作。 |
-| `session/update` | 为已提交 `assistant/message` 中的每个非空文本或图片块发出一个 `agent_message_chunk`，并保留顺序。图片在以内联 base64 交付前会重新读取并校验完整性。省略原始增量和非消息事件。 |
+| `session/update` | 为已提交 `assistant/message` 中的每个非空文本或图片块发出一个 `agent_message_chunk`，并保留顺序。图片在以内联 base64 交付前会重新读取并校验完整性。省略原始增量和非消息事件。在 `progress: 'tools'` 下，`tool_call`（id、工具名、kind、解析后的参数）及其 `tool_call_update`（completed/failed、结果文本）在同一条有序链上发出，因此工具调用不会晚于描述它的文本到达。 |
 | `session/request_permission` | 为携带工具调用 id、由桥接层拥有的批准请求提供一次性允许／拒绝选项。客户端可以自动回答。 |
 
 一个连接可以拥有多个会话。桥接层以带品牌的会话 id 作为记录键，并在路由事件或权限请求前检查 agent 是否为同一对象。每个会话都有独立的提示词槽位、工作区、取消路径和资源释放器。

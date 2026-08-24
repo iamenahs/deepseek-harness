@@ -32,9 +32,10 @@ import {
   type SessionNotification,
   type StopReason,
   type Stream,
+  type ToolKind,
 } from '@agentclientprotocol/sdk'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { SessionId, type SessionEvent, type TurnEndReason } from '@deepseek-ai/dsh-session'
+import { SessionId, type SessionEvent, type SessionEventMap, type TurnEndReason } from '@deepseek-ai/dsh-session'
 // Side-effect type import: declaration-merges the approval waterfall answered below.
 import type {} from '@deepseek-ai/dsh-user-approval'
 import { AcpContentError, admitAcpPrompt, assistantBlockToAcp, supportsAcpImagePrompts } from './content.ts'
@@ -68,11 +69,31 @@ function internalError(detail: string): RequestError {
 }
 
 /** Plugin config: the provider/model selection used for each ACP-created agent. */
+/** How much of a turn's progress the bridge publishes. */
+export type AcpProgress = 'none' | 'tools'
+
+/** Loader schema for {@link AcpProgress}; deployments that say nothing get `'none'`. */
+export const AcpProgressSchema: Schema<AcpProgress> = Schema.union([
+  Schema.const('none'),
+  Schema.const('tools'),
+]).default('none')
+
 export interface AcpConfig {
   /** Provider route for created agents. */
   provider?: string
   /** Model name for created agents. */
   model?: string
+  /**
+   * How much of a turn's progress reaches the client.
+   *
+   * `'none'` — the default and the established contract: committed assistant
+   * text and images only. `'tools'` adds the spec's own `tool_call` and
+   * `tool_call_update`, so a client can show *that* the agent read a file or
+   * ran a command, and attach a permission request to the call it names.
+   * Nothing else joins: terminals, diffs, locations, plans, titles, reasoning
+   * and elicitation stay off the automation wire.
+   */
+  progress?: AcpProgress
   /** Runtime-only transport override; production uses stdio. */
   stream?: Stream
 }
@@ -80,6 +101,7 @@ export interface AcpConfig {
 export const Config: Schema<AcpConfig> = Schema.object({
   provider: Schema.string(),
   model: Schema.string(),
+  progress: AcpProgressSchema,
 })
 
 /** Per-session protocol state. */
@@ -215,10 +237,39 @@ export function apply(ctx: Context, config: AcpConfig): void {
     /* v8 ignore stop */
   }
 
-  // Emit only committed assistant text/images. Raw chunks, reasoning, tools,
+  /** A tool call's ACP kind, read from the tool's own name. */
+  const toolKind = (name: string): ToolKind => {
+    if (/^(read|cat|open|view)/i.test(name)) return 'read'
+    if (/^(write|edit|apply|patch|create|update)/i.test(name)) return 'edit'
+    if (/^(bash|shell|exec|run|command|terminal)/i.test(name)) return 'execute'
+    if (/^(grep|glob|search|find|list|ls)/i.test(name)) return 'search'
+    if (/^(delete|remove|rm)/i.test(name)) return 'delete'
+    if (/^(fetch|web|http|browse)/i.test(name)) return 'fetch'
+    return 'other'
+  }
+
+  /** The model's raw argument JSON as an object, when it parsed as one. */
+  const rawInput = (args: string): Record<string, unknown> | undefined => {
+    try {
+      const parsed: unknown = JSON.parse(args)
+      return typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /** A tool result's model-facing text, for the client that shows what a call produced. */
+  const resultText = (message: SessionEventMap['tool/result']['message']): string =>
+    message.content[0].content
+      .map(block => (block.type === 'text' ? block.text : `[${block.type}]`))
+      .join('\n')
+
+  // Emit committed assistant text/images, and — when `progress: 'tools'` asks
+  // for it — the spec's own tool_call/tool_call_update. Raw chunks, reasoning,
   // plans, titles, and retry markers are presentation or trace data and stay
   // off the automation wire. One per-session chain preserves block/message
-  // order across asynchronous attachment reads.
+  // order across asynchronous attachment reads, and tool updates ride the same
+  // chain so a call never lands after the text that describes it.
   ctx.on('session/event', (session, event: SessionEvent) => {
     const record = sessions.get(session.header.id)
     if (record === undefined || record.agent.session !== session) return
@@ -241,6 +292,36 @@ export function apply(ctx: Context, config: AcpConfig): void {
           const failure = error as Error
           if (inflight !== undefined) inflight.outputError ??= failure
           logger.warn(`acp: assistant output conversion failed: ${errorChain(error)}`)
+        })
+      } else if (config.progress === 'tools' && event.type === 'tool/call') {
+        const input = rawInput(event.data.arguments)
+        const sent = record.outputTail.then(() => notify({
+          sessionId: record.agent.session.id,
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: event.data.callId,
+            title: event.data.name,
+            kind: toolKind(event.data.name),
+            status: 'in_progress',
+            ...(input === undefined ? {} : { rawInput: input }),
+          },
+        }))
+        record.outputTail = sent.catch((error: unknown) => {
+          logger.warn(`acp: tool call update failed: ${errorChain(error)}`)
+        })
+      } else if (config.progress === 'tools' && event.type === 'tool/result') {
+        const text = resultText(event.data.message)
+        const sent = record.outputTail.then(() => notify({
+          sessionId: record.agent.session.id,
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: event.data.message.source.callId,
+            status: event.data.error === undefined ? 'completed' : 'failed',
+            ...(text === '' ? {} : { content: [{ type: 'content', content: { type: 'text', text } }] }),
+          },
+        }))
+        record.outputTail = sent.catch((error: unknown) => {
+          logger.warn(`acp: tool result update failed: ${errorChain(error)}`)
         })
       }
     } finally {
