@@ -5,6 +5,18 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
 import { makeBridgeHarness, textResponse, type BridgeHarness } from './harness.ts'
 
+function reasoningToolCallResponse(): StreamChunk[] {
+  return [
+    { type: 'block-start', index: 0, blockType: 'reasoning' },
+    { type: 'reasoning-delta', index: 0, text: 'deciding to echo' },
+    { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'deciding to echo' } },
+    { type: 'block-start', index: 1, blockType: 'tool-call' },
+    { type: 'tool-call-delta', index: 1, id: CallId('call-1'), name: 'echo', argumentsDelta: '{}' },
+    { type: 'block-end', index: 1, block: { type: 'tool-call', id: CallId('call-1'), name: 'echo', arguments: '{}' } },
+    { type: 'finish', reason: { kind: 'tool-calls' } },
+  ]
+}
+
 function toolCallResponse(): StreamChunk[] {
   return [
     { type: 'block-start', index: 0, blockType: 'tool-call' },
@@ -76,6 +88,37 @@ describe('ACP automation output boundary', () => {
       },
       { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'done' } },
     ])
+  })
+
+  it('keeps reasoning and every other trace off the wire even with progress: tools', async () => {
+    // The opt-in widens the filter by exactly two update kinds. This runs a
+    // turn that produces reasoning *and* a tool call, and pins the whole
+    // update list — so anything else the session logs (reasoning, todos,
+    // titles, retry markers) leaking in would fail here rather than pass
+    // unnoticed because the fixture happened not to produce it.
+    harness = await makeBridgeHarness({
+      script: [reasoningToolCallResponse(), textResponse('done')],
+      config: { progress: 'tools' },
+    })
+    harness.ctx.tools.register(defineContentToolFixture({
+      name: 'echo',
+      description: 'Return a deterministic result.',
+      parameters: {},
+      execute: () => Promise.resolve([{ type: 'text', text: 'tool result' }]),
+    }))
+    await harness.client.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} })
+    const { sessionId } = await harness.client.newSession({ cwd: process.cwd(), mcpServers: [] })
+    await harness.client.prompt({ sessionId, prompt: [{ type: 'text', text: 'go' }] })
+
+    await vi.waitFor(() => { expect(harness!.updates).toHaveLength(3) })
+    expect(harness.updates.map(update => update.sessionUpdate)).toEqual([
+      'tool_call',
+      'tool_call_update',
+      'agent_message_chunk',
+    ])
+    // The model reasoned; nothing about it reached the client, as a thought
+    // chunk or as text inside the committed message.
+    expect(JSON.stringify(harness.updates)).not.toContain('deciding to echo')
   })
 
   it('ignores events from agents the bridge does not own', async () => {
