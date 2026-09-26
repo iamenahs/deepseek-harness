@@ -39,6 +39,15 @@
       "path": "../../session/session-persistence"
     },
     {
+      "path": "../../session/session-title"
+    },
+    {
+      "path": "../../session-query/session-query"
+    },
+    {
+      "path": "../../todo/tool-todo"
+    },
+    {
       "path": "../../interaction/user-approval"
     }
   ]

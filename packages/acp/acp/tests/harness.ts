@@ -10,6 +10,8 @@ import {
   methods,
   ndJsonStream,
   type Agent as AcpAgent,
+  type LoadSessionRequest,
+  type LoadSessionResponse,
   type PromptRequest,
   type PromptResponse,
   type RequestPermissionRequest,
@@ -24,6 +26,8 @@ import { type GenerateOptions, LlmAdapter, ReasoningEffortId, type LlmResolvedMo
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import SessionTitleService from '@deepseek-ai/dsh-session-title'
+import * as TodoTool from '@deepseek-ai/dsh-tool-todo'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import * as AcpPlugin from '../src/index.ts'
 import type { AcpConfig } from '../src/index.ts'
@@ -186,6 +190,7 @@ interface BridgeClient {
   initialize: NonNullable<AcpAgent['initialize']>
   authenticate: NonNullable<AcpAgent['authenticate']>
   newSession: NonNullable<AcpAgent['newSession']>
+  loadSession: (params: LoadSessionRequest, options?: SendRequestOptions) => Promise<LoadSessionResponse>
   listSessions: NonNullable<AcpAgent['listSessions']>
   resumeSession: NonNullable<AcpAgent['resumeSession']>
   closeSession: NonNullable<AcpAgent['closeSession']>
@@ -225,6 +230,10 @@ export async function makeBridgeHarness(options: {
   imageCapable?: boolean
   attachments?: boolean
   persistenceRoot?: string
+  /** Mount the real title service, matching the shipped `acp` profile's `dsh-base` bundle. */
+  sessionTitle?: boolean
+  /** Mount the real `todo_write` tool, matching the shipped `acp` profile's `dsh-base` bundle. */
+  todo?: boolean
 } = {}): Promise<BridgeHarness> {
   const adapter = new MockAdapter(options.script ?? [], options.imageCapable === true)
   const ctx = new Context()
@@ -234,6 +243,10 @@ export async function makeBridgeHarness(options: {
   await ctx.plugin(JsonlSessionPersistence, { root: persistenceRoot, compression: 'none' })
   await ctx.plugin(TokenMeter)
   if (options.attachments !== false) await ctx.plugin(MemoryAttachmentStore)
+  if (options.sessionTitle === true) {
+    await ctx.plugin(SessionTitleService, { fallbackMaxWords: 5, fallbackMaxBytes: 40, maxTitleBytes: 80 })
+  }
+  if (options.todo === true) await ctx.plugin(TodoTool, { allowParallelInProgress: false })
   const loopFiber = await ctx.plugin(AgentLoop, { agents: [] })
   const primaryAdapter = ctx.llm.registerAdapter(['mock'], adapter)
 
@@ -298,6 +311,7 @@ export async function makeBridgeHarness(options: {
     initialize: params => client.request(methods.agent.initialize, params),
     authenticate: params => client.request(methods.agent.authenticate, params),
     newSession: params => client.request(methods.agent.session.new, params),
+    loadSession: (params, options) => client.request(methods.agent.session.load, params, options),
     listSessions: params => client.request(methods.agent.session.list, params),
     resumeSession: params => client.request(methods.agent.session.resume, params),
     closeSession: params => client.request(methods.agent.session.close, params),

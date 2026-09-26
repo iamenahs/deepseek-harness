@@ -3,19 +3,22 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionUpdate, ToolCallContent } from '@agentclientprotocol/sdk'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import type {} from '@deepseek-ai/dsh-session-title'
 import type {} from '@deepseek-ai/dsh-token-meter'
+import type {} from '@deepseek-ai/dsh-tool-todo'
 import { assistantBlockToAcp } from './content.ts'
 
 /**
- * Convert one committed assistant message and its context usage in block order.
- * @param ctx - bridge context carrying attachment and token-meter services.
- * @param session - durable session used for context pressure.
+ * Convert one committed assistant message's blocks to ordered thought and
+ * message content updates, without context usage. Shared by live delivery,
+ * which pairs this with {@link usageUpdate}, and full `session/load` replay,
+ * which reports only history and omits usage entirely.
+ * @param ctx - bridge context carrying the attachment store used by content conversion.
  * @param event - committed assistant message event.
- * @returns ordered standard thought, message, and optional usage updates.
+ * @returns ordered standard thought and message updates.
  */
-export async function assistantUpdates(
+export async function assistantContentUpdates(
   ctx: Context,
-  session: Session,
   event: SessionEvent<'assistant/message'>,
 ): Promise<SessionUpdate[]> {
   const updates: SessionUpdate[] = []
@@ -39,6 +42,22 @@ export async function assistantUpdates(
       })
     }
   }
+  return updates
+}
+
+/**
+ * Convert one committed assistant message and its context usage in block order.
+ * @param ctx - bridge context carrying attachment and token-meter services.
+ * @param session - durable session used for context pressure.
+ * @param event - committed assistant message event.
+ * @returns ordered standard thought, message, and optional usage updates.
+ */
+export async function assistantUpdates(
+  ctx: Context,
+  session: Session,
+  event: SessionEvent<'assistant/message'>,
+): Promise<SessionUpdate[]> {
+  const updates = await assistantContentUpdates(ctx, event)
   const usage = usageUpdate(ctx, session, event)
   if (usage !== undefined) updates.push(usage)
   return updates
@@ -81,6 +100,34 @@ export async function toolResultUpdate(
     toolCallId: message.toolCallId,
     status: message.isError === true ? 'failed' : 'completed',
     content,
+  }
+}
+
+/**
+ * Report a DSH-titled session's current title to the client.
+ * @param event - committed DSH session-title event (fallback, provider, or user rename).
+ * @returns the standard session-metadata update.
+ */
+export function sessionInfoUpdate(event: SessionEvent<'session/title'>): SessionUpdate {
+  return { sessionUpdate: 'session_info_update', title: event.data.title }
+}
+
+/**
+ * Project one committed DSH todo-list snapshot to a complete standard ACP plan.
+ * DSH's `todo_write` tool tracks content and status only, with no priority
+ * concept of its own; every entry is reported at `medium` priority, the
+ * least invasive mapping until the todo tool grows one.
+ * @param event - committed DSH whole-list todo-write event.
+ * @returns the standard complete-replacement plan update.
+ */
+export function planUpdate(event: SessionEvent<'todo/write'>): SessionUpdate {
+  return {
+    sessionUpdate: 'plan',
+    entries: event.data.todos.map(todo => ({
+      content: todo.content,
+      priority: 'medium',
+      status: todo.status,
+    })),
   }
 }
 

@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`dsh-acp` lets trusted programs automate persistent DeepSeek Harness agents through the standard [ACP](https://agentclientprotocol.com): create or resume sessions, select a model and reasoning effort, attach MCP servers, submit or cancel work, receive semantic updates, and close sessions independently. Choose it for out-of-process subagents, test runners, and scripted controllers; it intentionally omits DSH-specific presentation data and interactive UI features. Persistence supports listing, resuming, and closing sessions across process restarts, but deletion, forks, transcript replay, and additional directories are unsupported. Run `pnpm dsh --profile acp` to start the server; use `dsh-subagent-acp` as the repository client.
+`dsh-acp` lets trusted programs automate persistent DeepSeek Harness agents through the standard [ACP](https://agentclientprotocol.com): create, resume, or load sessions with their history replayed, select a model and reasoning effort, attach MCP servers, submit or cancel work, receive semantic updates including DSH's session title and plan, and close sessions independently. Choose it for out-of-process subagents, test runners, and scripted controllers; it intentionally omits DSH-specific presentation data and interactive UI features. Persistence supports listing, resuming, loading, and closing sessions across process restarts, but deletion, forks, and additional directories are unsupported. Run `pnpm dsh --profile acp` to start the server; use `dsh-subagent-acp` as the repository client.
 
 ## Table of Contents
 
@@ -29,7 +29,7 @@ Use this package when a script, test runner, or another harness needs to run age
 
 ### When to choose it
 
-Choose it when automation should own the interaction: an out-of-process subagent, test runner, or scripted controller that manages persistent sessions, tools, model selection, and permissions. Avoid it when a human needs DSH-specific presentation cards, plans, titles, todos, terminal views, or elicitation; this server intentionally exposes only the standard ACP v1 surface.
+Choose it when automation should own the interaction: an out-of-process subagent, test runner, or scripted controller that manages persistent sessions, tools, model selection, and permissions. Avoid it when a human needs DSH-specific presentation cards, interactive todo editing, terminal views, or elicitation; this server intentionally exposes only the standard ACP v1 surface, including standard session titles and plan updates rather than DSH's richer presentation.
 
 ### Minimal configuration
 
@@ -61,19 +61,22 @@ One connection can run several sessions at once, each independent. The calls a c
 
 | Call | What you get |
 |---|---|
-| `initialize` | Stable ACP v1 plus `session/list`, `session/resume`, `session/close`, and Streamable HTTP MCP support; image prompts only when the durable attachment store and configured exact route support them. |
+| `initialize` | Stable ACP v1 plus `session/list`, `session/load`, `session/resume`, `session/close`, and Streamable HTTP MCP support; image prompts only when the durable attachment store and configured exact route support them. |
 | `authenticate` | Immediate success; the server requires no authentication. |
 | `session/new` | A fresh persistent agent whose absolute workspace and stdio or HTTP MCP servers are validated before publication, plus its complete configuration-option state. |
-| `session/list` | Deterministic newest-first pages of persisted, resumable root sessions; an optional absolute `cwd` filter uses physical-directory identity where possible. |
+| `session/list` | Deterministic newest-first pages of persisted, resumable root sessions, each carrying DSH's own session title when one has been generated; an optional absolute `cwd` filter uses physical-directory identity where possible. |
+| `session/load` | A persisted inactive session whose canonical workspace is verified before composition; its complete stored log replays as ordered `session/update` notifications — user and agent message chunks, thoughts, the generic tool-call lifecycle, and plan snapshots — before the call answers. |
 | `session/resume` | A persisted inactive session whose canonical workspace is verified before composition; its log is restored without replaying old updates. |
 | `session/close` | Quiescent cancellation, update draining, descendant disposal, persistence flush, and disposal of only the addressed Agent scope. |
 | `session/set_config_option` | A serialized update to the advertised `model` or `reasoning_effort`, returning the complete resulting state. |
 | `session/prompt` | Ordered text, resource links, and supported images, one prompt at a time per session; settlement follows Agent idle and ordered update delivery. |
 | `session/cancel` / `$/cancel_request` | The prompt-owned cancellation path; without an ACP prompt in flight it cancels autonomous work, while unknown session ids are no-ops. |
-| `session/update` | Committed assistant messages and thoughts, generic tool lifecycle, configuration changes, and context usage, serialized per session. |
+| `session/update` | Committed assistant messages and thoughts, generic tool lifecycle, configuration changes, context usage, DSH's session title, and `todo_write` plan snapshots, serialized per session. |
 | `session/request_permission` | A permission prompt with one-shot allow/reject choices; your client can answer automatically. |
 
-Session configuration offers opaque provider/model choices from the live LLM service catalog and a `reasoning_effort` selector when the exact model declares one. A prompt snapshots that selection before asynchronous image admission and pins it across every model step in that turn; a concurrent option change applies to the next turn. ACP clients are trusted controllers: stdio MCP entries authorize their absolute commands and environment, HTTP entries authorize their absolute HTTP(S) URLs and headers, and any initial connection or discovery failure rolls back the unpublished Agent. Unsupported surfaces are omitted or rejected: `session/load`, deletion, fork, additional directories, SSE or ACP-transport MCP, modes, commands, plans, terminals, client filesystem operations, and elicitation.
+Session configuration offers opaque provider/model choices from the live LLM service catalog and a `reasoning_effort` selector when the exact model declares one. A prompt snapshots that selection before asynchronous image admission and pins it across every model step in that turn; a concurrent option change applies to the next turn. ACP clients are trusted controllers: stdio MCP entries authorize their absolute commands and environment, HTTP entries authorize their absolute HTTP(S) URLs and headers, and any initial connection or discovery failure rolls back the unpublished Agent. Unsupported surfaces are omitted or rejected: deletion, fork, additional directories, SSE or ACP-transport MCP, modes, commands, terminals, client filesystem operations, and elicitation.
+
+DSH's own title, generated by whatever `dsh-session-title` provider a deployment registers (or the deterministic first-prompt fallback), surfaces as the `title` field on each `session/list` entry and as a `session_info_update` the moment DSH names or renames the session — the bridge reads and forwards this title rather than deriving one of its own. DSH's `todo_write` tool likewise keeps reporting its generic tool-call lifecycle, and now also emits a complete `plan` update alongside it; `todo_write` tracks no priority of its own, so every entry reports at `medium`.
 
 -----
 
@@ -102,6 +105,7 @@ The decision history lives in the [ACP as an automation-only protocol note](../.
 | [`src/index.ts`](src/index.ts) | Plugin entry: `Config` schema, `AgentSideConnection` wiring, per-session records, admission and settlement, teardown |
 | [`src/content.ts`](src/content.ts) | Wire-content admission and projection: image validation, route recheck, prompt reconstruction, assistant block conversion |
 | [`src/codec.ts`](src/codec.ts) | Pure turn-ending to ACP `stopReason` mapping |
+| [`src/replay.ts`](src/replay.ts) | Pure projection of one persisted session's complete stored log to the ordered updates `session/load` replays |
 | — | No runtime invariant companion is published; this transport owns no durable package-local event stream; protocol and lifecycle tests cover its mapping. |
 
 ### Admission and prompt settlement
@@ -169,7 +173,7 @@ These limits define when this package is a poor fit or needs special operational
 - **One primary workspace** — additional directories remain unsupported.
 - **Raster prompt images only** — PNG, JPEG, WebP, and GIF require a durable attachment store and an exact image-capable route.
 - **MCP tools only** — MCP resources and prompts have no DSH consumer.
-- **No transcript replay or interactive extensions** — session deletion, fork, `session/load`, modes, commands, plans, terminals, client filesystem operations, and elicitation remain outside this automation surface.
+- **No interactive extensions beyond the standard plan** — session deletion, fork, modes, commands, terminals, client filesystem operations, and elicitation remain outside this automation surface. `session/load` replays history and `todo_write` reports a standard `plan`; DSH's richer presentation cards and interactive todo editing stay with the harness's UI modules.
 
 <a id="dev-note"></a>
 ### Dev Note

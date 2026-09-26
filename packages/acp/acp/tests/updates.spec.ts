@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import { SessionSeq, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { assistantUpdates, toolCallUpdate, toolResultUpdate } from '../src/updates.ts'
+import type {} from '@deepseek-ai/dsh-session-title'
+import type {} from '@deepseek-ai/dsh-tool-todo'
+import { assistantUpdates, planUpdate, sessionInfoUpdate, toolCallUpdate, toolResultUpdate } from '../src/updates.ts'
 
 /** Minimal committed assistant event for pure update projection tests. */
 function assistantEvent(
@@ -88,6 +90,39 @@ describe('standard ACP update projection', () => {
       toolCallId: 'call-bad',
       status: 'failed',
       content: [],
+    })
+  })
+
+  it('reports the latest title from a session/title event', () => {
+    const update = sessionInfoUpdate({
+      type: 'session/title',
+      seq: SessionSeq(0),
+      time: 0,
+      data: { title: 'plan the launch', messageSeqs: [SessionSeq(0)], source: { kind: 'fallback' } },
+    })
+
+    expect(update).toEqual({ sessionUpdate: 'session_info_update', title: 'plan the launch' })
+  })
+
+  it('projects a todo-write snapshot to a complete plan at medium priority', () => {
+    const update = planUpdate({
+      type: 'todo/write',
+      seq: SessionSeq(0),
+      time: 0,
+      data: {
+        todos: [
+          { content: 'write tests', status: 'in_progress' },
+          { content: 'ship it', status: 'pending' },
+        ],
+      },
+    })
+
+    expect(update).toEqual({
+      sessionUpdate: 'plan',
+      entries: [
+        { content: 'write tests', priority: 'medium', status: 'in_progress' },
+        { content: 'ship it', priority: 'medium', status: 'pending' },
+      ],
     })
   })
 })
