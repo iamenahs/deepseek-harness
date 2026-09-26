@@ -31,6 +31,21 @@ function oneToolCall(): StreamChunk[] {
   ]
 }
 
+/** Scripted `todo_write` call carrying one whole-list snapshot. */
+function todoWriteCall(todos: { content: string; status: string }[]): StreamChunk[] {
+  const args = JSON.stringify({ todos })
+  return [
+    { type: 'block-start', index: 0, blockType: 'tool-call' },
+    { type: 'tool-call-delta', index: 0, id: ToolCallId('call-todo'), name: 'todo_write', argumentsDelta: args },
+    {
+      type: 'block-end',
+      index: 0,
+      block: { type: 'tool-call', id: ToolCallId('call-todo'), name: 'todo_write', arguments: args },
+    },
+    { type: 'finish', reason: { kind: 'tool-calls' } },
+  ]
+}
+
 describe('automation-only ACP bridge', () => {
   let harness: BridgeHarness | undefined
 
@@ -50,6 +65,7 @@ describe('automation-only ACP bridge', () => {
       protocolVersion: PROTOCOL_VERSION,
       agentInfo: { name: 'deepseek-harness-acp', version: '0.0.1' },
       agentCapabilities: {
+        loadSession: true,
         mcpCapabilities: { http: true },
         promptCapabilities: { image: false, audio: false, embeddedContext: false },
         sessionCapabilities: { close: {}, list: {}, resume: {} },
@@ -188,6 +204,92 @@ describe('automation-only ACP bridge', () => {
     expect(harness.adapter.requests[1]?.messages.map(message => message.content)).toContainEqual([
       { type: 'text', text: 'first prompt' },
     ])
+  })
+
+  it('reports a fallback session title on session/list and as a live update', async () => {
+    harness = await makeBridgeHarness({ sessionTitle: true, script: [textResponse('hi there')] })
+    await harness.client.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} })
+    const created = await harness.client.newSession({ cwd: process.cwd(), mcpServers: [] })
+
+    await harness.client.prompt({ sessionId: created.sessionId, prompt: [{ type: 'text', text: 'plan the launch' }] })
+
+    await vi.waitFor(() => {
+      expect(harness!.updates.some(update => update.sessionUpdate === 'session_info_update')).toBe(true)
+    })
+    expect(harness.updates.find(update => update.sessionUpdate === 'session_info_update')).toEqual({
+      sessionUpdate: 'session_info_update',
+      title: 'plan the launch',
+    })
+
+    await harness.client.closeSession({ sessionId: created.sessionId })
+    await expect(harness.client.listSessions({})).resolves.toEqual({
+      sessions: [{ sessionId: created.sessionId, cwd: process.cwd(), title: 'plan the launch' }],
+    })
+  })
+
+  it('loads a persisted session and replays its stored conversation before answering', async () => {
+    harness = await makeBridgeHarness({ script: [oneToolCall(), textResponse('used the tool'), textResponse('second reply')] })
+    await harness.client.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} })
+    const created = await harness.client.newSession({ cwd: process.cwd(), mcpServers: [] })
+    await harness.client.prompt({ sessionId: created.sessionId, prompt: [{ type: 'text', text: 'first prompt' }] })
+    await harness.client.prompt({ sessionId: created.sessionId, prompt: [{ type: 'text', text: 'second prompt' }] })
+    await harness.client.closeSession({ sessionId: created.sessionId })
+    const beforeLoad = harness.updates.length
+
+    const loaded = await harness.client.loadSession({ sessionId: created.sessionId, cwd: process.cwd(), mcpServers: [] })
+
+    expect(Array.isArray(loaded.configOptions)).toBe(true)
+    const replayed = harness.updates.slice(beforeLoad)
+    expect(replayed.map(update => update.sessionUpdate)).toEqual([
+      'user_message_chunk',
+      'tool_call',
+      'tool_call_update',
+      'agent_message_chunk',
+      'user_message_chunk',
+      'agent_message_chunk',
+    ])
+    expect(replayed[0]).toMatchObject({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'first prompt' } })
+    expect(replayed[3]).toMatchObject({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'used the tool' } })
+    expect(replayed[4]).toMatchObject({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'second prompt' } })
+    expect(replayed[5]).toMatchObject({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'second reply' } })
+
+    // The loaded session keeps working exactly like a resumed one.
+    await harness.client.prompt({ sessionId: created.sessionId, prompt: [{ type: 'text', text: 'never sent' }] })
+      .catch(() => {}) // the script is exhausted; only the prior queued messages matter here
+    expect(harness.adapter.requests.at(-1)?.messages.some(message =>
+      message.content.some(block => block.type === 'text' && block.text === 'first prompt'))).toBe(true)
+  })
+
+  it('rejects a second session/load while the persisted id is already active', async () => {
+    harness = await makeBridgeHarness({ script: [textResponse('answer')] })
+    await harness.client.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} })
+    const created = await harness.client.newSession({ cwd: process.cwd(), mcpServers: [] })
+
+    await expect(harness.client.loadSession({ sessionId: created.sessionId, cwd: process.cwd(), mcpServers: [] }))
+      .rejects.toThrow(/already active/)
+  })
+
+  it('emits a plan update for todo_write in addition to the generic tool call', async () => {
+    harness = await makeBridgeHarness({
+      todo: true,
+      script: [
+        todoWriteCall([{ content: 'write tests', status: 'in_progress' }, { content: 'ship it', status: 'pending' }]),
+        textResponse('updated the plan'),
+      ],
+    })
+    await harness.client.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} })
+    const created = await harness.client.newSession({ cwd: process.cwd(), mcpServers: [] })
+
+    await harness.client.prompt({ sessionId: created.sessionId, prompt: [{ type: 'text', text: 'plan it' }] })
+
+    expect(harness.updates.find(update => update.sessionUpdate === 'tool_call')).toMatchObject({ title: 'todo_write' })
+    expect(harness.updates.find(update => update.sessionUpdate === 'plan')).toEqual({
+      sessionUpdate: 'plan',
+      entries: [
+        { content: 'write tests', priority: 'medium', status: 'in_progress' },
+        { content: 'ship it', priority: 'medium', status: 'pending' },
+      ],
+    })
   })
 
   it('materializes an empty closed session for list and resume', async () => {

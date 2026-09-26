@@ -33,6 +33,8 @@ import {
   type InitializeResponse,
   type ListSessionsRequest,
   type ListSessionsResponse,
+  type LoadSessionRequest,
+  type LoadSessionResponse,
   type NewSessionRequest,
   type NewSessionResponse,
   type PromptRequest,
@@ -48,11 +50,14 @@ import {
 import type { ModelSelection } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
+import { readColdSessionLog } from '@deepseek-ai/dsh-session-query'
+import { foldSessionTitle } from '@deepseek-ai/dsh-session-title'
 // Side-effect type import: declaration-merges the approval waterfall answered below.
 import type {} from '@deepseek-ai/dsh-user-approval'
 import { supportsAcpImagePrompts } from './content.ts'
 import { AcpMcpConfigError } from './mcp.ts'
 import { AcpModelConfigError } from './model-control.ts'
+import { replayUpdates } from './replay.ts'
 import { AcpSession } from './session.ts'
 
 const DEFAULT_SESSION_LIST_PAGE_SIZE = 100
@@ -121,6 +126,24 @@ export function apply(ctx: Context, config: AcpConfig): void {
     return record
   }
 
+  /**
+   * Fold a persisted, currently inactive session's title from its complete
+   * stored log. Reads the whole log per call: DSH keeps no separate title
+   * index, and the session-title service only folds a live session, so this
+   * mirrors exactly what session/load's replay already reads to report the
+   * same title consistently. A read failure is logged and treated as titleless
+   * rather than failing the whole session/list page.
+   */
+  const titleFor = async (id: SessionId, signal?: AbortSignal): Promise<string | undefined> => {
+    try {
+      const cold = await readColdSessionLog(persistence, id, signal)
+      return foldSessionTitle(cold.events)?.title
+    } catch (error: unknown) {
+      logger.warn(`acp: session/list title read failed for ${id}: ${errorChain(error)}`)
+      return undefined
+    }
+  }
+
   /** Send one ordered protocol update while containing transport-only failure. */
   const notify = async (notification: SessionNotification): Promise<void> => {
     try {
@@ -181,6 +204,7 @@ export function apply(ctx: Context, config: AcpConfig): void {
         protocolVersion: PROTOCOL_VERSION,
         agentInfo: { name: 'deepseek-harness-acp', version: '0.0.1' },
         agentCapabilities: {
+          loadSession: true,
           mcpCapabilities: { http: true },
           promptCapabilities: { image: imagePromptEnabled, audio: false, embeddedContext: false },
           sessionCapabilities: { close: {}, list: {}, resume: {} },
@@ -289,6 +313,64 @@ export function apply(ctx: Context, config: AcpConfig): void {
       })().finally(() => { activating.delete(sessionId) })
     },
 
+    async loadSession(params: LoadSessionRequest, signal: AbortSignal): Promise<LoadSessionResponse> {
+      assertOpen()
+      validateWorkspaceParams(params)
+      const sessionId = brandString<SessionId>(params.sessionId)
+      if (sessions.has(sessionId) || activating.has(sessionId) || ctx.sessions.get(sessionId) !== undefined) {
+        throw invalidParams(`session is already active: ${sessionId}`)
+      }
+      activating.add(sessionId)
+      return (async (): Promise<LoadSessionResponse> => {
+        const persisted = (await persistence.stat(sessionId, { signal }))?.header
+        if (persisted === undefined || persisted.origin === 'subagent' || persisted.parentSession !== undefined) {
+          throw invalidParams(`session is not resumable: ${sessionId}`)
+        }
+        if (!await sameDirectory(persisted.cwd, params.cwd)) {
+          throw invalidParams(`session cwd does not match: ${params.cwd}`)
+        }
+        // Read and convert the complete stored log before composing the live
+        // Agent: a conversion failure then never publishes a half-loaded session.
+        const cold = await readColdSessionLog(persistence, sessionId, signal)
+        const replay = await replayUpdates(ctx, cold.events)
+        let record: AcpSession
+        try {
+          record = await AcpSession.resume(ctx, {
+            sessionId,
+            cwd: params.cwd,
+            mcpServers: params.mcpServers,
+            agentOptions: agentOptions(config),
+            fallbackSelection: initialSelection(config),
+            signal,
+            notify,
+          })
+        } catch (error: unknown) {
+          if (error instanceof AcpMcpConfigError) throw invalidParams(error.message)
+          throw error
+        }
+        /* v8 ignore start -- the persisted header was checked before resume; the factory restores that exact header. */
+        if (!await sameDirectory(record.agent.session.header.cwd, params.cwd)) {
+          await record.close('session/load cwd mismatch')
+          throw invalidParams(`session cwd does not match: ${params.cwd}`)
+        }
+        /* v8 ignore stop */
+        /* v8 ignore next 4 -- a real stdio close can race an in-flight load. */
+        if (closed) {
+          await record.close('connection closed during session/load')
+          throw internalError('connection closed during session/load')
+        }
+        sessions.set(sessionId, record)
+        try {
+          for (const update of replay) await notify({ sessionId, update })
+          return { configOptions: await record.configOptions(signal) }
+        } catch (error: unknown) {
+          sessions.delete(sessionId)
+          await record.close('session/load activation failed')
+          throw error
+        }
+      })().finally(() => { activating.delete(sessionId) })
+    },
+
     async listSessions(params: ListSessionsRequest, signal: AbortSignal): Promise<ListSessionsResponse> {
       assertOpen()
       if (params.cwd !== undefined && params.cwd !== null && !isAbsolute(params.cwd)) {
@@ -324,8 +406,12 @@ export function apply(ctx: Context, config: AcpConfig): void {
         : entries.filter(entry => isAfterSessionListCursor(entry, cursor))
       const page = remaining.slice(0, sessionListPageSize)
       const next = remaining.length > page.length ? page.at(-1) : undefined
+      const titledPage = await Promise.all(page.map(async ({ sessionId, cwd }) => {
+        const title = await titleFor(sessionId, signal)
+        return { sessionId, cwd, ...title === undefined ? {} : { title } }
+      }))
       return {
-        sessions: page.map(({ sessionId, cwd }) => ({ sessionId, cwd })),
+        sessions: titledPage,
         ...next === undefined ? {} : { nextCursor: encodeSessionListCursor(next) },
       }
     },
@@ -382,6 +468,7 @@ export function apply(ctx: Context, config: AcpConfig): void {
       return {}
     })
     .onRequest(methods.agent.session.new, ({ params, signal }) => implementation.newSession(params, signal))
+    .onRequest(methods.agent.session.load, ({ params, signal }) => implementation.loadSession(params, signal))
     .onRequest(methods.agent.session.list, ({ params, signal }) => implementation.listSessions(params, signal))
     .onRequest(methods.agent.session.resume, ({ params, signal }) => implementation.resumeSession(params, signal))
     .onRequest(methods.agent.session.close, ({ params }) => implementation.closeSession(params))

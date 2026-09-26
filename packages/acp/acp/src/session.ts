@@ -17,7 +17,7 @@ import { AcpContentError, admitAcpPrompt } from './content.ts'
 import { turnEndToStopReason } from './codec.ts'
 import { mountAcpMcpServers } from './mcp.ts'
 import { AcpModelControl } from './model-control.ts'
-import { assistantUpdates, toolCallUpdate, toolResultUpdate } from './updates.ts'
+import { assistantUpdates, planUpdate, sessionInfoUpdate, toolCallUpdate, toolResultUpdate } from './updates.ts'
 
 /** The continuable-subagent teardown used without depending on the subagent package. */
 interface ContinuableDrain {
@@ -376,6 +376,24 @@ export class AcpSession {
           /* v8 ignore start -- supplemental-content conversion failure is contained and cannot fail Agent work. */
           .catch((error: unknown) => {
             this.ctx.logger.warn(`acp: tool-result update delivery failed: ${errorChain(error)}`)
+          })
+        /* v8 ignore stop */
+      } else if (event.type === 'session/title') {
+        const previous = this.outputTail
+        this.outputTail = previous
+          .then(() => this.notify({ sessionId: this.agent.session.id, update: sessionInfoUpdate(event) }))
+          /* v8 ignore start -- the bridge notifier contains transport rejection. */
+          .catch((error: unknown) => {
+            this.ctx.logger.warn(`acp: session-info update delivery failed: ${errorChain(error)}`)
+          })
+        /* v8 ignore stop */
+      } else if (event.type === 'todo/write') {
+        const previous = this.outputTail
+        this.outputTail = previous
+          .then(() => this.notify({ sessionId: this.agent.session.id, update: planUpdate(event) }))
+          /* v8 ignore start -- the bridge notifier contains transport rejection. */
+          .catch((error: unknown) => {
+            this.ctx.logger.warn(`acp: plan update delivery failed: ${errorChain(error)}`)
           })
         /* v8 ignore stop */
       }
